@@ -82,7 +82,7 @@ def parse_city_data(city_info: Dict[str, str]) -> Dict[str, str]:
 
 
 def main() -> None:
-    """Řídící funkce scraperu."""
+    """Řídící funkce scraperu"""
     validate_args(sys.argv)
     target_url, output_file = sys.argv[1], sys.argv[2]
     
@@ -101,10 +101,11 @@ def main() -> None:
         if row:
             all_results.append(row)
     
-    # Uložení pomocí pandas (automaticky vyřeší chybějící sloupce stran)
+    # Uložení přes pandas (automaticky vyřeší chybějící sloupce stran)
     df = pd.DataFrame(all_results).fillna("0")
     df.to_csv(output_file, index=False, encoding="utf-8-sig")
     print(f"HOTOVO. DATA ULOŽENA DO SOUBORU: {output_file}")
+
 
 
 if __name__ == "__main__":
