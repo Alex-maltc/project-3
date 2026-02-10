@@ -3,9 +3,7 @@ Projekt: Election Scraper 2017
 Autor: Aleksei Maltcev
 Popis: Skript pro stahování výsledků voleb z webu volby.cz.
 """
-
 import sys
-import csv
 from typing import List, Dict, Optional
 import requests
 from bs4 import BeautifulSoup
@@ -13,68 +11,67 @@ import pandas as pd
 
 
 def validate_args(args: List[str]) -> None:
-    """Ověří vstupní argumenty z příkazové řádky."""
+    """Ověří přítomnost dvou povinných argumentů a validitu URL."""
     if len(args) != 3:
-        print("Chyba: Zadejte URL a název výstupního souboru.")
-        print('Příklad: python main.py "URL_ADRESA" "vysledky.csv"')
+        print("Chyba: Zadejte URL adresu a název výstupního souboru.")
+        print('Použití: python main.py "URL" "vysledky.csv"')
         sys.exit(1)
     if "volby.cz" not in args[1]:
-        print("Chyba: Neplatná doména v URL.")
+        print("Chyba: Zadaný odkaz není z domény volby.cz.")
         sys.exit(1)
 
 
 def get_soup(url: str) -> Optional[BeautifulSoup]:
-    """Stáhne obsah stránky a vrátí objekt BeautifulSoup."""
-    headers: Dict[str, str] = {'User-Agent': 'Mozilla/5.0'}
+    """Stáhne HTML obsah a vrátí objekt BeautifulSoup."""
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
         response.raise_for_status()
         return BeautifulSoup(response.content, 'html.parser')
-    except requests.RequestException as exc:
-        print(f"Chyba při stahování {url}: {exc}")
+    except requests.RequestException as e:
+        print(f"Nastala chyba při stahování dat: {e}")
         return None
 
 
-def get_municipality_links(url: str) -> List[str]:
-    """Získá seznam všech odkazů na detaily obcí."""
+def get_municipality_links(url: str) -> List[Dict[str, str]]:
+    """Získá kódy obcí a jejich URL z přehledu územního celku."""
     soup = get_soup(url)
     if not soup:
         return []
-    
-    links: List[str] = []
-    base_url = "https://www.volby.cz/pls/ps2017nss/"
-    # Odkazy jsou v buňkách td s třídou 'cislo'
-    for td in soup.find_all("td", class_="cislo"):
-        a_tag = td.find("a")
+
+    base_url: str = "https://www.volby.cz/pls/ps2017nss/"
+    links: List[Dict[str, str]] = []
+
+    for td_code in soup.find_all("td", class_="cislo"):
+        a_tag = td_code.find("a")
         if a_tag:
-            links.append(base_url + a_tag["href"])
+            links.append({
+                "code": a_tag.text,
+                "url": base_url + a_tag["href"]
+            })
     return links
 
 
-def parse_municipality_data(url: str) -> Dict[str, str]:
-    """Získá statistiky a výsledky stran z konkrétní obce."""
-    soup = get_soup(url)
+def parse_city_data(city_info: Dict[str, str]) -> Dict[str, str]:
+    """Získá název, statistiky a hlasy stran z konkrétní obce."""
+    soup = get_soup(city_info["url"])
     if not soup:
         return {}
 
-    # Základní info o obci
-    # ID obce se bere z URL parametru 'xobec'
-    m_id = url.split("xobec=")[1].split("&")[0]
-    name = soup.find_all("h3")[1].text.split(":")[-1].strip()
+    # Název obce je v druhém nadpisu h3
+    city_name = soup.find_all("h3")[1].text.split(":")[-1].strip()
     
-    # Účast (tabulka ps311_t1)
-    table_sum = soup.find("table", id="ps311_t1")
-    tds = table_sum.find_all("td")
+    # Účast (tabulka s ID ps311_t1)
+    summary_tds = soup.find("table", id="ps311_t1").find_all("td")
     
-    data = {
-        "code": m_id,
-        "location": name,
-        "registered": tds[3].text.replace('\xa0', ''),
-        "envelopes": tds[4].text.replace('\xa0', ''),
-        "valid": tds[7].text.replace('\xa0', '')
+    data: Dict[str, str] = {
+        "code": city_info["code"],
+        "location": city_name,
+        "registered": summary_tds[3].text.replace('\xa0', ''),
+        "envelopes": summary_tds[4].text.replace('\xa0', ''),
+        "valid": summary_tds[7].text.replace('\xa0', '')
     }
 
-    # Hlasy pro strany (všechny tabulky s třídou 'table' kromě první)
+    # Hlasy pro strany (všechny tabulky 'table' kromě první)
     for table in soup.find_all("table", class_="table")[1:]:
         for row in table.find_all("tr")[2:]:
             cols = row.find_all("td")
@@ -84,28 +81,31 @@ def parse_municipality_data(url: str) -> Dict[str, str]:
     return data
 
 
-def run_scraper(target_url: str, output_name: str) -> None:
-    """Hlavní procesní funkce scraperu."""
-    print(f"Stahuji data z: {target_url}")
-    links = get_municipality_links(target_url)
+def main() -> None:
+    """Řídící funkce scraperu."""
+    validate_args(sys.argv)
+    target_url, output_file = sys.argv[1], sys.argv[2]
     
-    if not links:
-        print("Nebyly nalezeny žádné odkazy na obce.")
+    print(f"VYHLEDÁVÁM OBCE NA ADRESE: {target_url}")
+    municipality_links = get_municipality_links(target_url)
+    
+    if not municipality_links:
+        print("Nebyly nalezeny žádné obce ke zpracování.")
         return
 
-    results: List[Dict[str, str]] = []
-    for i, link in enumerate(links, 1):
-        m_data = parse_municipality_data(link)
-        if m_data:
-            print(f"Zpracovávám {i}/{len(links)}: {m_data['location']}")
-            results.append(m_data)
-
-    # Uložení pomocí pandas pro správné zarovnání sloupců (stran)
-    df = pd.DataFrame(results).fillna(0)
-    df.to_csv(output_name, index=False, encoding="utf-8-sig")
-    print(f"Hotovo. Data uložena do {output_name}")
+    all_results: List[Dict[str, str]] = []
+    print(f"ZPRACOVÁVÁM CELKEM {len(municipality_links)} OBCÍ...")
+    
+    for item in municipality_links:
+        row = parse_city_data(item)
+        if row:
+            all_results.append(row)
+    
+    # Uložení pomocí pandas (automaticky vyřeší chybějící sloupce stran)
+    df = pd.DataFrame(all_results).fillna("0")
+    df.to_csv(output_file, index=False, encoding="utf-8-sig")
+    print(f"HOTOVO. DATA ULOŽENA DO SOUBORU: {output_file}")
 
 
 if __name__ == "__main__":
-    validate_args(sys.argv)
-    run_scraper(sys.argv[1], sys.argv[2])
+    main()
