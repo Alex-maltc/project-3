@@ -1,89 +1,111 @@
+"""
+Projekt: Election Scraper 2017
+Autor: Aleksei Maltcev
+Popis: Skript pro stahování výsledků voleb z webu volby.cz.
+"""
+
 import sys
+import csv
+from typing import List, Dict, Optional
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 
-def validate_arguments():
-    """Ověří, zda uživatel zadal správný počet argumentů."""
-    if len(sys.argv) != 3:
-        print("Chyba: Nesprávný počet argumentů.")
-        print("Použití: python main.py <URL_ADRESA> <VYSTUPNI_SOUBOR>")
-        print('Příklad: python main.py "https://www.volby.cz/pls/ps2017nss/ps32?xjazyk=CZ&xkraj=2&xnumnuts=2103" "vysledky.csv"')
+
+def validate_args(args: List[str]) -> None:
+    """Ověří vstupní argumenty z příkazové řádky."""
+    if len(args) != 3:
+        print("Chyba: Zadejte URL a název výstupního souboru.")
+        print('Příklad: python main.py "URL_ADRESA" "vysledky.csv"')
         sys.exit(1)
-    
-    url = sys.argv[1]
-    if "https://www.volby.cz/pls/ps2017nss/" not in url:
-        print("Chyba: Neplatný odkaz. Zadejte prosím korektní URL z webu volby.cz.")
+    if "volby.cz" not in args[1]:
+        print("Chyba: Neplatná doména v URL.")
         sys.exit(1)
 
-def get_soup(url):
-    header = {'User-Agent': 'Mozilla/5.0'}
+
+def get_soup(url: str) -> Optional[BeautifulSoup]:
+    """Stáhne obsah stránky a vrátí objekt BeautifulSoup."""
+    headers: Dict[str, str] = {'User-Agent': 'Mozilla/5.0'}
     try:
-        response = requests.get(url, headers=header)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return BeautifulSoup(response.content, 'html.parser')
-    except Exception as e:
-        print(f"Chyba při stahování dat: {e}")
+    except requests.RequestException as exc:
+        print(f"Chyba při stahování {url}: {exc}")
         return None
 
-def scrape_data(url, output_file):
+
+def get_municipality_links(url: str) -> List[str]:
+    """Získá seznam všech odkazů na detaily obcí."""
     soup = get_soup(url)
-    if not soup: return
-
-    print(f"STAHUJI DATA Z VYBRANÉHO URL: {url}")
+    if not soup:
+        return []
     
-    # Najdeme odkazy na obce v tabulkách
-    links = []
-    tables = soup.find_all("table", class_="table")
-    for table in tables:
-        rows = table.find_all("tr")[2:]
-        for row in rows:
-            tds = row.find_all("td")
-            if len(tds) > 2 and tds[0].find("a"):
-                links.append("https://www.volby.cz/pls/ps2017nss/" + tds[0].find("a")["href"])
+    links: List[str] = []
+    base_url = "https://www.volby.cz/pls/ps2017nss/"
+    # Odkazy jsou v buňkách td s třídou 'cislo'
+    for td in soup.find_all("td", class_="cislo"):
+        a_tag = td.find("a")
+        if a_tag:
+            links.append(base_url + a_tag["href"])
+    return links
 
-    all_data = []
+
+def parse_municipality_data(url: str) -> Dict[str, str]:
+    """Získá statistiky a výsledky stran z konkrétní obce."""
+    soup = get_soup(url)
+    if not soup:
+        return {}
+
+    # Základní info o obci
+    # ID obce se bere z URL parametru 'xobec'
+    m_id = url.split("xobec=")[1].split("&")[0]
+    name = soup.find_all("h3")[1].text.split(":")[-1].strip()
     
-    for i, link in enumerate(links):
-        city_soup = get_soup(link)
-        if not city_soup: continue
-        
-        # Jméno obce
-        city_name = city_soup.find_all("h3")[1].text.split(":")[-1].strip()
-        print(f"Zpracovávám: {city_name}")
-        
-        # Základní statistiky
-        summary_table = city_soup.find("table", id="ps311_t1")
-        voters = summary_table.find_all("td")[3].text.replace('\xa0', '')
-        envelopes = summary_table.find_all("td")[4].text.replace('\xa0', '')
-        valid = summary_table.find_all("td")[7].text.replace('\xa0', '')
+    # Účast (tabulka ps311_t1)
+    table_sum = soup.find("table", id="ps311_t1")
+    tds = table_sum.find_all("td")
+    
+    data = {
+        "code": m_id,
+        "location": name,
+        "registered": tds[3].text.replace('\xa0', ''),
+        "envelopes": tds[4].text.replace('\xa0', ''),
+        "valid": tds[7].text.replace('\xa0', '')
+    }
 
-        row_data = {
-            "code": link.split("xobec=")[1].split("&")[0],
-            "location": city_name,
-            "registered": voters,
-            "envelopes": envelopes,
-            "valid": valid
-        }
+    # Hlasy pro strany (všechny tabulky s třídou 'table' kromě první)
+    for table in soup.find_all("table", class_="table")[1:]:
+        for row in table.find_all("tr")[2:]:
+            cols = row.find_all("td")
+            if len(cols) > 2 and cols[1].text != "-":
+                data[cols[1].text] = cols[2].text.replace('\xa0', '')
+    
+    return data
 
-        # Výsledky stran
-        party_tables = city_soup.find_all("table", class_="table")[1:]
-        for p_table in party_tables:
-            p_rows = p_table.find_all("tr")[2:]
-            for p_row in p_rows:
-                p_tds = p_row.find_all("td")
-                if len(p_tds) > 2 and p_tds[1].text != "-":
-                    party_name = p_tds[1].text
-                    votes = p_tds[2].text.replace('\xa0', '')
-                    row_data[party_name] = votes
-        
-        all_data.append(row_data)
 
-    # Uložení do CSV
-    df = pd.DataFrame(all_data).fillna(0)
-    df.to_csv(output_file, index=False, encoding="utf-8-sig")
-    print(f"HOTOVO. SOUBOR ULOŽEN: {output_file}")
+def run_scraper(target_url: str, output_name: str) -> None:
+    """Hlavní procesní funkce scraperu."""
+    print(f"Stahuji data z: {target_url}")
+    links = get_municipality_links(target_url)
+    
+    if not links:
+        print("Nebyly nalezeny žádné odkazy na obce.")
+        return
+
+    results: List[Dict[str, str]] = []
+    for i, link in enumerate(links, 1):
+        m_data = parse_municipality_data(link)
+        if m_data:
+            print(f"Zpracovávám {i}/{len(links)}: {m_data['location']}")
+            results.append(m_data)
+
+    # Uložení pomocí pandas pro správné zarovnání sloupců (stran)
+    df = pd.DataFrame(results).fillna(0)
+    df.to_csv(output_name, index=False, encoding="utf-8-sig")
+    print(f"Hotovo. Data uložena do {output_name}")
+
 
 if __name__ == "__main__":
-    validate_arguments()
-    scrape_data(sys.argv[1], sys.argv[2])
+    validate_args(sys.argv)
+    run_scraper(sys.argv[1], sys.argv[2])
